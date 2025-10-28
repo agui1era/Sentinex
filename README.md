@@ -24,7 +24,7 @@ Built for real-world surveillance scenarios — resilient, lightweight and local
 2. Clone this repo and create a `.env` file as shown below.
 3. Run:
 
-```bash
+```bashx
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -49,7 +49,7 @@ INTERVAL=60
 # 🧠 LLM Settings
 LM_STUDIO_API=http://localhost:1234/v1/chat/completions
 MODEL_NAME=qwen3-vl-8b
-SYSTEM_PROMPT=Eres un centinela cognitivo. Observas imágenes de cámaras y detectas presencia humana, anomalías o riesgos. Devuelve siempre en JSON: {"descripcion":"...", "evaluacion":"...", "riesgo":0.0}
+SYSTEM_PROMPT=You are a cognitive sentinel. You observe camera images to detect human presence, anomalies, or risks. Always respond in valid JSON: {"description":"...", "evaluation":"...", "risk":0.0}
 
 # ⚠️ Risk scoring
 RISK_THRESHOLD=0.8
