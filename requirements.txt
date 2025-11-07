@@ -1,3 +1,4 @@
 opencv-python
-python-dotenv
 requests
+python-dotenv
+pyttsx3
