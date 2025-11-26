@@ -1,129 +1,212 @@
+# sentinex_multicamera.py — Sistema Multicámara compatible con OmniStatus v2
+# Autor: Zorro12 + ZorroIA
+
 import os
 import cv2
 import time
 import base64
 import requests
-import re
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
 
-RTSP_URL = os.getenv("RTSP_URL")
+# ============================================================
+# 🔧 CONFIG
+# ============================================================
+
+CAMERAS = {
+    "CAM1": os.getenv("RTSP_URL_CAM1"),
+    "CAM3": os.getenv("RTSP_URL_CAM3"),
+    "CAM4": os.getenv("RTSP_URL_CAM4"),
+    "CAM6": os.getenv("RTSP_URL_CAM6"),
+    "CAM8": os.getenv("RTSP_URL_CAM8"),
+}
+
 FRAME_WIDTH = int(os.getenv("FRAME_WIDTH", "1280"))
 FRAME_HEIGHT = int(os.getenv("FRAME_HEIGHT", "720"))
-FRAME_SCALE = float(os.getenv("FRAME_SCALE", "1.0"))
 FRAME_MAX_WIDTH = int(os.getenv("FRAME_MAX_WIDTH", "960"))
-INTERVAL = float(os.getenv("INTERVAL", "60"))
 
-LM_STUDIO_API = os.getenv("LM_STUDIO_API")
-MODEL_NAME = os.getenv("MODEL_NAME")
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")
-RISK_THRESHOLD = float(os.getenv("RISK_THRESHOLD", "0.8"))
+INTERVAL = float(os.getenv("INTERVAL", "60"))  # segundos entre capturas
 
+LM_API = os.getenv("LM_STUDIO_API")
+MODEL_NAME = os.getenv("MODEL_NAME", "qwen2.5-7b")
+
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.8"))
+
+# Telegram (opcional)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-RISK_REGEX = re.compile(r"\"riesgo\"\\s*:\\s*(0(?:\\.\\d+)?|1(?:\\.0+)?)", re.IGNORECASE)
+# OmniStatus (opcional)
+ENABLE_OMNISTATUS = os.getenv("ENABLE_OMNISTATUS", "0") == "1"
+OMNISTATUS_API = os.getenv("OMNISTATUS_ENDPOINT")
+
+# ============================================================
+# ⚙️ FUNCIONES UTILITARIAS
+# ============================================================
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-def resize_if_needed(frame, max_width: int):
-    if max_width and frame.shape[1] > max_width:
-        scale = max_width / frame.shape[1]
+
+def resize_if_needed(frame):
+    """Reduce tamaño si excede ancho máximo."""
+    if FRAME_MAX_WIDTH and frame.shape[1] > FRAME_MAX_WIDTH:
+        scale = FRAME_MAX_WIDTH / frame.shape[1]
         new_size = (int(frame.shape[1] * scale), int(frame.shape[0] * scale))
         frame = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
     return frame
 
-def a_b64_jpg(frame):
-    ok, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+
+def to_b64_jpg(frame):
+    """Convierte el frame a JPEG base64."""
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
-        raise RuntimeError("Fallo al codificar JPEG")
-    im_b64 = base64.b64encode(buf).decode("utf-8")
-    return im_b64, f"data:image/jpeg;base64,{im_b64}"
+        raise RuntimeError("No se pudo convertir frame a JPEG")
+    return base64.b64encode(buf).decode("utf-8")
 
-def analizar_imagen(frame):
-    im_b64, data_uri = a_b64_jpg(frame)
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": data_uri}}]},
-    ]
-    payload = {"model": MODEL_NAME, "messages": messages, "temperature": 0.1, "max_tokens": 700}
+
+# ============================================================
+# 🧠 ANALISIS Cognitivo con LLM
+# ============================================================
+
+def analizar_llm(camera_name, frame) -> dict:
+    """Envía el frame al modelo local Qwen y obtiene (score, description)."""
+    img_b64 = to_b64_jpg(frame)
+    img_data_uri = f"data:image/jpeg;base64,{img_b64}"
+
+    system_prompt = os.getenv(f"SYSTEM_PROMPT_{camera_name}", "")
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": img_data_uri}}
+            ]},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 700,
+    }
+
     try:
-        resp = requests.post(LM_STUDIO_API, json=payload, timeout=60)
-        if resp.status_code == 200:
-            content = resp.json()["choices"][0]["message"]["content"]
-            return content, im_b64
-        else:
-            log(f"[LLM] Error HTTP {resp.status_code}: {resp.text[:100]}")
+        r = requests.post(LM_API, json=payload, timeout=60)
+        r.raise_for_status()
+        raw = r.json()["choices"][0]["message"]["content"]
+        parsed = json.loads(raw)
+
+        # El modelo debe devolver {"score": float, "description": string}
+        return {
+            "score": float(parsed.get("score", 0.0)),
+            "text": parsed.get("description", ""),
+            "b64": img_b64
+        }
+
     except Exception as e:
-        log(f"[LLM] Error conexión: {e}")
-    return None, im_b64
+        log(f"❌ LLM error ({camera_name}): {e}")
+        return {"score": 0.0, "text": "Error en análisis", "b64": img_b64}
 
-def extraer_riesgo(texto: str):
-    if not texto:
-        return None
-    m = RISK_REGEX.search(texto)
-    if m:
-        try:
-            val = float(m.group(1))
-            return val if 0.0 <= val <= 1.0 else None
-        except ValueError:
-            pass
-    return None
 
-def enviar_telegram(im_b64: str, desc: str):
+# ============================================================
+# 📡 Telegram
+# ============================================================
+
+def enviar_telegram(img_b64: str, caption: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "caption": desc[:1024]}
-    files = {"photo": base64.b64decode(im_b64)}
     try:
-        resp = requests.post(url, data=data, files=files, timeout=20)
-        log(f"📨 Telegram: {resp.status_code} {resp.text[:100]}")
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1024]}
+        files = {"photo": base64.b64decode(img_b64)}
+        r = requests.post(url, data=data, files=files, timeout=20)
+        log(f"📨 Telegram status: {r.status_code}")
     except Exception as e:
-        log(f"❌ Telegram error: {e}")
+        log(f"❌ Error Telegram: {e}")
 
-def iniciar_stream(backoff_start=5, backoff_max=60):
+
+# ============================================================
+# 🛰️ Inyección a OmniStatus (formato v2)
+# ============================================================
+
+def inyectar_omnistatus(source: str, text: str, score: float):
+    if not ENABLE_OMNISTATUS or not OMNISTATUS_API:
+        return
+    try:
+        payload = {
+            "source": source,
+            "text": text,
+            "score": score
+        }
+        r = requests.post(OMNISTATUS_API, json=payload, timeout=10)
+        log(f"📡 Inyectado a OmniStatus: {r.status_code}")
+    except Exception as e:
+        log(f"❌ Error inyección OmniStatus: {e}")
+
+
+# ============================================================
+# 🎥 PROCESAMIENTO DE CADA CÁMARA
+# ============================================================
+
+def procesar_camara(nombre, url):
     retries = 0
-    while True:
-        cap = cv2.VideoCapture(RTSP_URL)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    cap = cv2.VideoCapture(url)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 
-        if not cap.isOpened():
-            wait = min(backoff_start * (2 ** retries), backoff_max)
-            log(f"❌ No se pudo abrir RTSP. Reintentando en {wait}s...")
-            time.sleep(wait)
-            retries += 1
-            continue
+    if not cap.isOpened():
+        log(f"❌ No se pudo abrir {nombre}")
+        return
 
-        log("✅ Conectado a RTSP.")
-        return cap
-
-def main():
-    cap = iniciar_stream()
+    log(f"🎥 Cámara {nombre} iniciada")
 
     while True:
         ok, frame = cap.read()
         if not ok:
-            log("⚠️ Fallo al capturar frame. Reintentando conexión...")
+            log(f"⚠️ Frame inválido en {nombre}, reintentando...")
+            time.sleep(3)
             cap.release()
-            cap = iniciar_stream()
+            cap = cv2.VideoCapture(url)
+            retries += 1
+            if retries > 5:
+                log(f"❌ {nombre} agotó reintentos. Pausa 60s")
+                time.sleep(60)
+                retries = 0
             continue
 
-        frame = resize_if_needed(frame, FRAME_MAX_WIDTH)
-        texto, im_b64 = analizar_imagen(frame)
-        riesgo = extraer_riesgo(texto)
+        retries = 0
+        frame = resize_if_needed(frame)
 
-        log("──────── LLM OUTPUT ────────")
-        print(texto or "[Vacío]")
-        log(f"RIESGO: {riesgo}")
+        res = analizar_llm(nombre, frame)
 
-        if riesgo is not None and riesgo >= RISK_THRESHOLD:
-            enviar_telegram(im_b64, texto)
+        score = res["score"]
+        text = res["text"]
+
+        log(f"[{nombre}] score={score:.2f} | {text}")
+
+        if score >= SCORE_THRESHOLD:
+            enviar_telegram(res["b64"], f"🚨 {nombre}: {text}")
+
+        inyectar_omnistatus(nombre, text, score)
 
         time.sleep(INTERVAL)
+
+
+# ============================================================
+# 🚀 MAIN PROGRAM — multihilo
+# ============================================================
+
+def main():
+    from threading import Thread
+
+    for nombre, url in CAMERAS.items():
+        if not url:
+            continue
+        Thread(target=procesar_camara, args=(nombre, url), daemon=True).start()
+
+    while True:
+        time.sleep(3600)
+
 
 if __name__ == "__main__":
     main()
