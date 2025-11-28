@@ -1,4 +1,4 @@
-# sentinex_multicamera.py — Sistema Multicámara compatible con OmniStatus v2
+# sentinex_multicamera.py — Versión API KEY (sin HMAC)
 # Autor: Zorro12 + ZorroIA
 
 import os
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================================
-# 🔧 CONFIG
+# CONFIG
 # ============================================================
 
 CAMERAS = {
@@ -26,24 +26,28 @@ CAMERAS = {
 FRAME_WIDTH = int(os.getenv("FRAME_WIDTH", "1280"))
 FRAME_HEIGHT = int(os.getenv("FRAME_HEIGHT", "720"))
 FRAME_MAX_WIDTH = int(os.getenv("FRAME_MAX_WIDTH", "960"))
+INTERVAL = float(os.getenv("INTERVAL", "60"))
 
-INTERVAL = float(os.getenv("INTERVAL", "60"))  # segundos entre capturas
+# Aquí va el PROXY (ngrok o IP)
+LM_API = os.getenv("LM_STUDIO_API").rstrip("/")
+LM_PATH = os.getenv("LM_STUDIO_PATH", "/chat/completions")
+MODEL_NAME = os.getenv("MODEL_NAME", "qwen3-vl-8b")
 
-LM_API = os.getenv("LM_STUDIO_API")
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen2.5-7b")
+API_KEY = os.getenv("API_KEY")  # <-- tu API KEY simple
 
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.8"))
 
-# Telegram (opcional)
+# Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# OmniStatus (opcional)
+# OmniStatus
 ENABLE_OMNISTATUS = os.getenv("ENABLE_OMNISTATUS", "0") == "1"
 OMNISTATUS_API = os.getenv("OMNISTATUS_ENDPOINT")
 
+
 # ============================================================
-# ⚙️ FUNCIONES UTILITARIAS
+# UTILS
 # ============================================================
 
 def log(msg):
@@ -51,7 +55,6 @@ def log(msg):
 
 
 def resize_if_needed(frame):
-    """Reduce tamaño si excede ancho máximo."""
     if FRAME_MAX_WIDTH and frame.shape[1] > FRAME_MAX_WIDTH:
         scale = FRAME_MAX_WIDTH / frame.shape[1]
         new_size = (int(frame.shape[1] * scale), int(frame.shape[0] * scale))
@@ -60,7 +63,6 @@ def resize_if_needed(frame):
 
 
 def to_b64_jpg(frame):
-    """Convierte el frame a JPEG base64."""
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
         raise RuntimeError("No se pudo convertir frame a JPEG")
@@ -68,11 +70,10 @@ def to_b64_jpg(frame):
 
 
 # ============================================================
-# 🧠 ANALISIS Cognitivo con LLM
+# ANALISIS LLM (API KEY)
 # ============================================================
 
 def analizar_llm(camera_name, frame) -> dict:
-    """Envía el frame al modelo local Qwen y obtiene (score, description)."""
     img_b64 = to_b64_jpg(frame)
     img_data_uri = f"data:image/jpeg;base64,{img_b64}"
 
@@ -90,13 +91,20 @@ def analizar_llm(camera_name, frame) -> dict:
         "max_tokens": 700,
     }
 
+    url = LM_API + LM_PATH
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {API_KEY}"
+    }
+
     try:
-        r = requests.post(LM_API, json=payload, timeout=60)
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
         r.raise_for_status()
+
         raw = r.json()["choices"][0]["message"]["content"]
         parsed = json.loads(raw)
 
-        # El modelo debe devolver {"score": float, "description": string}
         return {
             "score": float(parsed.get("score", 0.0)),
             "text": parsed.get("description", ""),
@@ -109,7 +117,7 @@ def analizar_llm(camera_name, frame) -> dict:
 
 
 # ============================================================
-# 📡 Telegram
+# TELEGRAM
 # ============================================================
 
 def enviar_telegram(img_b64: str, caption: str):
@@ -126,26 +134,21 @@ def enviar_telegram(img_b64: str, caption: str):
 
 
 # ============================================================
-# 🛰️ Inyección a OmniStatus (formato v2)
+# OMNISTATUS
 # ============================================================
 
 def inyectar_omnistatus(source: str, text: str, score: float):
     if not ENABLE_OMNISTATUS or not OMNISTATUS_API:
         return
     try:
-        payload = {
-            "source": source,
-            "text": text,
-            "score": score
-        }
-        r = requests.post(OMNISTATUS_API, json=payload, timeout=10)
-        log(f"📡 Inyectado a OmniStatus: {r.status_code}")
+        payload = {"source": source, "text": text, "score": score}
+        requests.post(OMNISTATUS_API, json=payload, timeout=10)
     except Exception as e:
         log(f"❌ Error inyección OmniStatus: {e}")
 
 
 # ============================================================
-# 🎥 PROCESAMIENTO DE CADA CÁMARA
+# CAMARA LOOP
 # ============================================================
 
 def procesar_camara(nombre, url):
@@ -193,7 +196,7 @@ def procesar_camara(nombre, url):
 
 
 # ============================================================
-# 🚀 MAIN PROGRAM — multihilo
+# MAIN
 # ============================================================
 
 def main():

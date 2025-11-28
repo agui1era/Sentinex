@@ -2,3 +2,6 @@ opencv-python
 requests
 python-dotenv
 pyttsx3
+fastapi
+httpx
+uvicorn
