@@ -17,8 +17,6 @@ load_dotenv()
 
 CAMERAS = {
     "CAM1": os.getenv("RTSP_URL_CAM1"),
-    "CAM3": os.getenv("RTSP_URL_CAM3"),
-    "CAM4": os.getenv("RTSP_URL_CAM4"),
     "CAM6": os.getenv("RTSP_URL_CAM6"),
     "CAM8": os.getenv("RTSP_URL_CAM8"),
 }
@@ -33,7 +31,7 @@ LM_API = os.getenv("LM_STUDIO_API").rstrip("/")
 LM_PATH = os.getenv("LM_STUDIO_PATH", "/chat/completions")
 MODEL_NAME = os.getenv("MODEL_NAME", "qwen3-vl-8b")
 
-API_KEY = os.getenv("API_KEY")  # <-- tu API KEY simple
+API_KEY = os.getenv("API_KEY")  
 
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.8"))
 

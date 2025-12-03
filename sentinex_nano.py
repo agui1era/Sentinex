@@ -66,9 +66,7 @@ def create_rtsp_capture_chinese_cam(rtsp_url):
     Crea una captura RTSP optimizada para cámaras chinas (Hikvision, Dahua, etc.)
     Estas cámaras tienen implementaciones RTSP no estándar que requieren configuraciones especiales.
     """
-    
-    # SOLUCIÓN 1: Forzar UDP y deshabilitar verificaciones estrictas
-    # Las cámaras chinas a menudo fallan con TCP debido a su implementación propietaria
+
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
         "rtsp_transport;udp|"
         "rtsp_flags;prefer_tcp|"
@@ -81,7 +79,7 @@ def create_rtsp_capture_chinese_cam(rtsp_url):
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     
     if cap.isOpened():
-        # Configurar buffer mínimo (cámaras chinas tienen latencia alta)
+        
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
         # Intentar leer un frame de prueba
@@ -95,7 +93,7 @@ def create_rtsp_capture_chinese_cam(rtsp_url):
         cap.release()
         logging.warning("UDP abierto pero no lee frames. Probando siguiente método...")
     
-    # SOLUCIÓN 2: TCP con opciones relajadas
+ 
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
         "rtsp_transport;tcp|"
         "rtsp_flags;prefer_tcp|"
@@ -118,7 +116,7 @@ def create_rtsp_capture_chinese_cam(rtsp_url):
         cap.release()
         logging.warning("TCP abierto pero no lee frames. Probando siguiente método...")
     
-    # SOLUCIÓN 3: Sin especificar transporte (dejar que FFmpeg decida)
+    
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "allowed_media_types;video"
     
     logging.info("🔧 Intentando conexión automática (FFmpeg decide)...")
@@ -136,8 +134,7 @@ def create_rtsp_capture_chinese_cam(rtsp_url):
         
         cap.release()
     
-    # SOLUCIÓN 4: URL alternativa con substream
-    # Las cámaras Hikvision/Dahua tienen múltiples streams
+
     alternative_urls = [
         rtsp_url.replace("/onvif1", "/Streaming/Channels/101"),  # Hikvision mainstream
         rtsp_url.replace("/onvif1", "/Streaming/Channels/102"),  # Hikvision substream
