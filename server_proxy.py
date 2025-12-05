@@ -4,13 +4,13 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 import httpx
 
-# Cargar .env.server
+# Load .env.server configuration
 load_dotenv(".env.server")
 
-# Base URL de LM Studio (SIN /v1 !!!)
+# Base URL of LM Studio (WITHOUT /v1 suffix!)
 LM_STUDIO_URL = os.getenv("LM_STUDIO_URL").rstrip("/")
 
-# API KEY interna (puede ser cualquier string)
+# Internal API KEY (can be any string)
 API_KEY = os.getenv("API_KEY", "12345")
 
 app = FastAPI()
@@ -19,19 +19,19 @@ app = FastAPI()
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def proxy(request: Request, path: str):
 
-    # cuerpo crudo del request
+    # Get raw request body
     body = await request.body()
 
-    # construir URL destino
-    target_url = f"{LM_STUDIO_URL}/{path.lstrip('/')}"  # evita doble slash
+    # Build target URL
+    target_url = f"{LM_STUDIO_URL}/{path.lstrip('/')}"  # avoid double slash
 
-    # headers a LM Studio
+    # Headers to forward to LM Studio
     headers = {
         "Content-Type": request.headers.get("Content-Type", "application/json"),
         "Authorization": f"Bearer {API_KEY}"
     }
 
-    # cliente HTTP con timeout extendido
+    # HTTP client with extended timeout
     async with httpx.AsyncClient(timeout=120) as client:
         try:
             resp = await client.request(
@@ -46,7 +46,7 @@ async def proxy(request: Request, path: str):
                 content={"error": f"Proxy error: {str(e)}"}
             )
 
-    # retornar EXACTO lo que respondió LM Studio
+    # Return EXACT response from LM Studio
     return Response(
         content=resp.content,
         status_code=resp.status_code,
