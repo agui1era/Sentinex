@@ -1,5 +1,6 @@
-# sentinex.py — Multi-camera cognitive surveillance
+# sentinex.py — Multi-camera cognitive surveillance (English / Stable)
 # Author: Oscar Aguilera
+# Architecture: Producer-Consumer to prevent stream freezing.
 
 import os
 import cv2
@@ -7,12 +8,24 @@ import time
 import base64
 import requests
 import json
+import logging
+import io
+import socket
+from logging.handlers import RotatingFileHandler
+from threading import Thread, Lock
+from queue import Queue
+
 from dotenv import load_dotenv
+from gtts import gTTS
+
+# Suppress pygame support prompt
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
+import pygame
 
 load_dotenv()
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
 def load_cameras_from_env():
@@ -30,44 +43,67 @@ def load_cameras_from_env():
 
 CAMERAS = load_cameras_from_env()
 
-FRAME_WIDTH = int(os.getenv("FRAME_WIDTH", "1280"))
-FRAME_HEIGHT = int(os.getenv("FRAME_HEIGHT", "720"))
+# Frame and Scaling settings
 FRAME_MAX_WIDTH = int(os.getenv("FRAME_MAX_WIDTH", "960"))
-INTERVAL = float(os.getenv("INTERVAL", "60"))
-_last_dir = os.getenv("LAST_FRAME_DIR", "last_frames")
-LAST_FRAME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), _last_dir) if not os.path.isabs(_last_dir) else _last_dir
+INTERVAL = float(os.getenv("INTERVAL", "0")) # Set to 0 for max speed
+LAST_FRAME_DIR = os.getenv("LAST_FRAME_DIR", "last_frames")
 
-# LLM API configuration (supports ngrok or local IP)
+# LLM API Settings
 LM_API = os.getenv("LM_STUDIO_API", "").rstrip("/")
 LM_PATH = os.getenv("LM_STUDIO_PATH", "/chat/completions")
 MODEL_NAME = os.getenv("MODEL_NAME", "qwen3-vl-8b")
-
 API_KEY = os.getenv("API_KEY")  
 
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.8"))
-HUMAN_ALERT_DEFAULT = float(os.getenv("HUMAN_ALERT_COOLDOWN", "300"))
-HUMAN_ALERT_MIN_SCORE = float(os.getenv("HUMAN_ALERT_MIN_SCORE", "0.2"))
-HUMAN_ALERT_COOLDOWNS = {
-    name: float(os.getenv(f"HUMAN_ALERT_COOLDOWN_{name}", HUMAN_ALERT_DEFAULT))
-    for name in CAMERAS.keys()
-}
+# Decision Threshold
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.4"))
 
-# Telegram
+# Integrations
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-# OmniStatus
 ENABLE_OMNISTATUS = os.getenv("ENABLE_OMNISTATUS", "0") == "1"
 OMNISTATUS_API = os.getenv("OMNISTATUS_ENDPOINT")
 
+# TTS (Text-to-Speech)
+TTS_ENABLED = os.getenv("TTS_ENABLED", "0") == "1"
+TTS_MESSAGE = os.getenv("TTS_MESSAGE", "Alert. Risk detected in the area.")
+TTS_LANG = os.getenv("TTS_LANG", "en") # Changed default to 'en' given the request, or keep 'es' in .env
+TTS_COOLDOWN = float(os.getenv("TTS_COOLDOWN", "60"))
+
+# Heartbeat
+HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "1") == "1"
+HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "86400"))
+
+# Logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FILE = os.getenv("LOG_FILE", "sentinex.log")
 
 # ============================================================
-# UTILS
+# LOGGING SETUP
 # ============================================================
 
-def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+logger = logging.getLogger("sentinex")
+logger.setLevel(LOG_LEVEL)
 
+ch = logging.StreamHandler()
+ch.setLevel(LOG_LEVEL)
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
+ch.setFormatter(formatter)
+logger.addHandler(ch)
+
+fh = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3)
+fh.setLevel(LOG_LEVEL)
+fh.setFormatter(formatter)
+logger.addHandler(fh)
+
+def log(msg, level="info"):
+    if level.lower() == "error": logger.error(msg)
+    elif level.lower() == "warning": logger.warning(msg)
+    else: logger.info(msg)
+
+
+# ============================================================
+# UTILS & PRODUCER CLASS
+# ============================================================
 
 def resize_if_needed(frame):
     if FRAME_MAX_WIDTH and frame.shape[1] > FRAME_MAX_WIDTH:
@@ -84,43 +120,101 @@ def to_b64_jpg(frame):
     return base64.b64encode(buf).decode("utf-8")
 
 
-def risk_emoji(score: float) -> str:
-    if score >= 0.8:
-        return "🚨"
-    if score >= 0.4:
-        return "⚠️"
-    return "ℹ️"
-
-
-def human_detected(text: str, payload: dict) -> bool:
-    human_flag = payload.get("human") if isinstance(payload, dict) else None
-    if human_flag is None and isinstance(payload, dict):
-        human_flag = payload.get("human_detected")
-    if isinstance(human_flag, bool):
-        return human_flag
-
-    text_lower = (text or "").lower()
-    keywords = ["human", "humano", "persona", "person", "people", "hombre", "mujer"]
-    return any(k in text_lower for k in keywords)
-
-
 def save_last_frame(camera_name: str, frame):
-    """Save the last analyzed frame for each camera."""
     try:
         os.makedirs(LAST_FRAME_DIR, exist_ok=True)
         safe_name = "".join(c if c.isalnum() else "_" for c in camera_name)
         path = os.path.join(LAST_FRAME_DIR, f"{safe_name}_last.jpg")
         ok = cv2.imwrite(path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         if not ok:
-            log(f"⚠️ Failed to save frame from {camera_name}")
+            log(f"⚠️ Failed to save frame for {camera_name}", "warning")
         else:
             log(f"💾 Frame saved: {path}")
     except Exception as e:
-        log(f"⚠️ Error saving frame from {camera_name}: {e}")
+        log(f"⚠️ Error saving frame for {camera_name}: {e}", "error")
 
+
+def play_audio(text: str, lang: str = "es", repeats: int = 1, delay: float = 0.0):
+    try:
+        tts = gTTS(text=text, lang=lang)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
+
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+
+        pygame.mixer.music.load(mp3_fp)
+        
+        for i in range(repeats):
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.1)
+                
+            if i < repeats - 1:
+                time.sleep(delay)
+
+    except Exception as e:
+        log(f"❌ Audio playback error: {e}", "error")
+
+
+class CameraStream:
+    """Producer: Captures frames and keeps only the most recent one."""
+    def __init__(self, name, url):
+        self.name = name
+        self.url = url
+        self.frame = None
+        self.lock = Lock()
+        self.stopped = False
+        self.thread = Thread(target=self._update, daemon=True)
+        self.thread.start()
+
+    def _update(self):
+        retries = 0
+        while not self.stopped:
+            cap = cv2.VideoCapture(self.url)
+            
+            if not cap.isOpened():
+                log(f"❌ {self.name}: Failed to open stream. Retrying in 5s.", "error")
+                time.sleep(5)
+                retries += 1
+                if retries > 10:
+                    log(f"❌ {self.name}: Persistent failure. Stopping producer.", "error")
+                    self.stopped = True
+                continue
+            
+            log(f"🎥 {self.name}: Producer started.")
+            retries = 0
+            
+            while not self.stopped:
+                # Read and discard to get ONLY THE LATEST MOMENT
+                for _ in range(3):
+                    cap.grab()
+                
+                ok, frame = cap.read()
+                
+                if not ok or frame is None:
+                    log(f"⚠️ {self.name}: Invalid stream/frame. Forcing reconnection.", "warning")
+                    cap.release()
+                    break
+                
+                with self.lock:
+                    self.frame = frame
+                
+                time.sleep(0.01) # Minimal sleep to prevent CPU hogging
+            
+            cap.release()
+            
+    def read(self):
+        with self.lock:
+            return self.frame.copy() if self.frame is not None else None
+
+    def stop(self):
+        self.stopped = True
+        self.thread.join(timeout=2)
 
 # ============================================================
-# LLM ANALYSIS (API KEY)
+# LLM & CONSUMER (Analysis)
 # ============================================================
 
 def analyze_llm(camera_name, frame) -> dict:
@@ -149,7 +243,7 @@ def analyze_llm(camera_name, frame) -> dict:
     }
 
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        r = requests.post(url, json=payload, headers=headers, timeout=60) 
         r.raise_for_status()
 
         raw = r.json()["choices"][0]["message"]["content"]
@@ -162,12 +256,61 @@ def analyze_llm(camera_name, frame) -> dict:
         }
 
     except Exception as e:
-        log(f"❌ LLM error ({camera_name}): {e}")
-        return {"score": 0.0, "text": "Analysis error", "b64": img_b64}
+        log(f"❌ LLM Error ({camera_name}): {e}", "error")
+        return {"score": 0.0, "text": "LLM Analysis Error", "b64": img_b64}
+
+
+def process_camera_analysis(stream: CameraStream):
+    """Consumer: Pulls frame, analyzes it, triggers alerts based on SCORE."""
+    
+    name = stream.name
+    log(f"🧠 Consumer {name} started for cognitive analysis.")
+
+    last_tts_alert_at = 0.0
+
+    while not stream.stopped:
+        
+        frame = stream.read() 
+        if frame is None:
+            log(f"⏳ {name}: Waiting for first frame from producer...", "info")
+            time.sleep(1)
+            continue
+        
+        # SLOW ANALYSIS
+        frame = resize_if_needed(frame)
+        res = analyze_llm(name, frame) 
+        save_last_frame(name, frame)
+
+        score = res["score"]
+        text = res["text"]
+
+        # -------------------------------------------------------------
+        # Main Log: ONLY SCORE AND DESCRIPTION
+        # -------------------------------------------------------------
+        log(f"[{name}] score={score:.2f} | {text}")
+
+        if score >= SCORE_THRESHOLD: 
+            
+            # 1. Telegram Alert (Critical)
+            send_telegram(res["b64"], f"🚨 {name}: {text} | Risk={score:.2f}")
+
+            # 2. TTS Alert
+            if TTS_ENABLED:
+                now = time.time()
+                elapsed_tts = now - last_tts_alert_at
+                if elapsed_tts >= TTS_COOLDOWN:
+                    log(f"🔊 Playing audio alert for {name} (Risk={score:.2f})")
+                    play_audio(TTS_MESSAGE, TTS_LANG, repeats=3, delay=2.0)
+                    last_tts_alert_at = now
+        
+        # 3. OmniStatus
+        inject_omnistatus(name, text, score)
+        
+        time.sleep(INTERVAL)
 
 
 # ============================================================
-# TELEGRAM
+# HEARTBEAT, TELEGRAM, OMNISTATUS & MAIN
 # ============================================================
 
 def send_telegram(img_b64: str, caption: str):
@@ -180,12 +323,8 @@ def send_telegram(img_b64: str, caption: str):
         r = requests.post(url, data=data, files=files, timeout=20)
         log(f"📨 Telegram status: {r.status_code}")
     except Exception as e:
-        log(f"❌ Error Telegram: {e}")
+        log(f"❌ Telegram Error: {e}", "error")
 
-
-# ============================================================
-# OMNISTATUS
-# ============================================================
 
 def inject_omnistatus(source: str, text: str, score: float):
     if not ENABLE_OMNISTATUS or not OMNISTATUS_API:
@@ -194,90 +333,61 @@ def inject_omnistatus(source: str, text: str, score: float):
         payload = {"source": source, "text": text, "score": score}
         requests.post(OMNISTATUS_API, json=payload, timeout=10)
     except Exception as e:
-        log(f"❌ OmniStatus injection error: {e}")
+        log(f"❌ OmniStatus injection error: {e}", "error")
 
-
-# ============================================================
-# CAMERA LOOP
-# ============================================================
-
-def process_camera(name, url):
-    retries = 0
-    cap = cv2.VideoCapture(url)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-
-    if not cap.isOpened():
-        log(f"❌ Failed to open {name}")
+def heartbeat_loop():
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log("Telegram not configured. Heartbeat disabled.", "warning")
+        return
+    
+    if not HEARTBEAT_ENABLED:
+        log("Heartbeat disabled in config.", "info")
         return
 
-    log(f"🎥 Camera {name} started")
-    last_human_alert_at = 0.0
-    cooldown = HUMAN_ALERT_COOLDOWNS.get(name, HUMAN_ALERT_DEFAULT)
-
+    hostname = socket.gethostname()
     while True:
-        ok, frame = cap.read()
-        if not ok:
-            log(f"⚠️ Invalid frame on {name}, retrying...")
-            time.sleep(3)
-            cap.release()
-            cap = cv2.VideoCapture(url)
-            retries += 1
-            if retries > 5:
-                log(f"❌ {name} exhausted retries. Pausing 60s")
-                time.sleep(60)
-                retries = 0
-            continue
-
-        retries = 0
-        frame = resize_if_needed(frame)
-
-        res = analyze_llm(name, frame)
-        save_last_frame(name, frame)
-
-        score = res["score"]
-        text = res["text"]
-        human = human_detected(text, res)
-
-        log(f"[{name}] score={score:.2f} | {text}")
-
-        risk_sent = False
-        if score >= SCORE_THRESHOLD:
-            emoji = risk_emoji(score)
-            send_telegram(res["b64"], f"{emoji} {name}: {text} | Risk={score:.2f}")
-            risk_sent = True
-
-        if human and not risk_sent:
-            now = time.time()
-            elapsed = now - last_human_alert_at
-            if score < HUMAN_ALERT_MIN_SCORE:
-                log(f"[{name}] Person detected, but score={score:.2f} < min {HUMAN_ALERT_MIN_SCORE:.2f}; alert not sent")
-            elif elapsed >= cooldown:
-                send_telegram(res["b64"], f"🧍 {name}: Person detected | Risk={score:.2f} | {text}")
-                last_human_alert_at = now
-            else:
-                remaining = int(cooldown - elapsed)
-                log(f"[{name}] Person detected but in cooldown ({remaining}s remaining)")
-
-        inject_omnistatus(name, text, score)
-
-        time.sleep(INTERVAL)
-
-
-# ============================================================
-# MAIN
-# ============================================================
+        try:
+            msg = f"🟢 Sentinex active and running on: {hostname}"
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+            requests.post(url, data=data, timeout=20)
+            log(f"💓 Heartbeat sent: {msg}")
+        except Exception as e:
+            log(f"❌ Heartbeat Error: {e}", "error")
+        
+        time.sleep(HEARTBEAT_INTERVAL)
 
 def main():
-    from threading import Thread
+    if not CAMERAS:
+        log("No cameras defined in .env (RTSP_URL_...). Exiting.", "error")
+        return
+
+    streams = {}
 
     for name, url in CAMERAS.items():
         if not url:
             continue
-        Thread(target=process_camera, args=(name, url), daemon=True).start()
+        
+        # 1. START PRODUCER (Fast thread)
+        stream = CameraStream(name, url)
+        streams[name] = stream
+        
+        # 2. START CONSUMER (Slow AI thread)
+        Thread(target=process_camera_analysis, args=(stream,), daemon=True).start()
 
+    log("Sentinex started. Press Ctrl+C to exit.")
+
+    # Start Heartbeat Thread
+    Thread(target=heartbeat_loop, daemon=True).start()
+    
     while True:
-        time.sleep(3600)
+        try:
+            time.sleep(1)
+        except KeyboardInterrupt:
+            log("Shutting down...")
+            for stream in streams.values():
+                stream.stop()
+            break
 
 
 if __name__ == "__main__":
