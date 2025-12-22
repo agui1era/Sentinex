@@ -212,3 +212,9 @@ env_coqui/bin/futurize
 env_coqui/bin/pasteurize
 env_coqui/bin/httpx
 env_coqui/bin/uvicorn
+sentinex.log.2
+.gitignore
+sentinex.log.1
+last_frames/CAM3_last.jpg
+last_frames/CAM5_last.jpg
+sentinex.log.3

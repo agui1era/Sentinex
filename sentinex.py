@@ -13,7 +13,8 @@ import io
 import socket
 from logging.handlers import RotatingFileHandler
 from threading import Thread, Lock
-from queue import Queue
+from datetime import datetime
+
 
 from dotenv import load_dotenv
 from gtts import gTTS
@@ -54,8 +55,9 @@ LM_PATH = os.getenv("LM_STUDIO_PATH", "/chat/completions")
 MODEL_NAME = os.getenv("MODEL_NAME", "qwen3-vl-8b")
 API_KEY = os.getenv("API_KEY")  
 
-# Decision Threshold
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.4"))
+# --- DECISION THRESHOLDS ---
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.25")) # Warning
+SCORE_CRITICAL = float(os.getenv("SCORE_CRITICAL", "0.45"))   # Siren
 
 # Integrations
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -63,11 +65,16 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 ENABLE_OMNISTATUS = os.getenv("ENABLE_OMNISTATUS", "0") == "1"
 OMNISTATUS_API = os.getenv("OMNISTATUS_ENDPOINT")
 
-# TTS (Text-to-Speech)
+# TTS (Text-to-Speech) - WARNING LEVEL
 TTS_ENABLED = os.getenv("TTS_ENABLED", "0") == "1"
-TTS_MESSAGE = os.getenv("TTS_MESSAGE", "Alert. Risk detected in the area.")
-TTS_LANG = os.getenv("TTS_LANG", "en") # Changed default to 'en' given the request, or keep 'es' in .env
+TTS_MESSAGE = os.getenv("TTS_MESSAGE", "Alexa enciende el desierto 15 segundos.")
+TTS_LANG = os.getenv("TTS_LANG", "es") 
 TTS_COOLDOWN = float(os.getenv("TTS_COOLDOWN", "60"))
+
+# SIREN (Audio File) - CRITICAL LEVEL
+# AQUI: Asegúrate que este nombre coincida con tu archivo generado
+SIREN_FILE = os.getenv("SIREN_FILE", "alarma_infernal.wav") 
+SIREN_COOLDOWN = float(os.getenv("SIREN_COOLDOWN", "30"))
 
 # Heartbeat
 HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "1") == "1"
@@ -76,6 +83,8 @@ HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "86400"))
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.getenv("LOG_FILE", "sentinex.log")
+
+
 
 # ============================================================
 # LOGGING SETUP
@@ -128,13 +137,13 @@ def save_last_frame(camera_name: str, frame):
         ok = cv2.imwrite(path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         if not ok:
             log(f"⚠️ Failed to save frame for {camera_name}", "warning")
-        else:
-            log(f"💾 Frame saved: {path}")
     except Exception as e:
         log(f"⚠️ Error saving frame for {camera_name}: {e}", "error")
 
 
-def play_audio(text: str, lang: str = "es", repeats: int = 1, delay: float = 0.0):
+def play_audio_tts(text: str, lang: str = "es", repeats: int = 1, delay: float = 0.0):
+    """Generates TTS on the fly and plays it."""
+    if not TTS_ENABLED: return
     try:
         tts = gTTS(text=text, lang=lang)
         mp3_fp = io.BytesIO()
@@ -145,17 +154,35 @@ def play_audio(text: str, lang: str = "es", repeats: int = 1, delay: float = 0.0
             pygame.mixer.init()
 
         pygame.mixer.music.load(mp3_fp)
-        
         for i in range(repeats):
             pygame.mixer.music.play()
             while pygame.mixer.music.get_busy():
                 time.sleep(0.1)
-                
             if i < repeats - 1:
                 time.sleep(delay)
-
     except Exception as e:
-        log(f"❌ Audio playback error: {e}", "error")
+        log(f"❌ TTS playback error: {e}", "error")
+
+
+def play_siren_file():
+    """Plays the local siren WAV/MP3 file at max volume."""
+    if not os.path.exists(SIREN_FILE):
+        log(f"❌ Siren file not found at: {SIREN_FILE}", "error")
+        return
+
+    try:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+        
+        # Load and play
+        pygame.mixer.music.load(SIREN_FILE)
+        pygame.mixer.music.set_volume(1.0) 
+        pygame.mixer.music.play()
+        
+        log(f"🔊 SIREN ACTIVATED 🚨 ({SIREN_FILE})")
+        
+    except Exception as e:
+        log(f"❌ Siren playback error: {e}", "error")
 
 
 class CameraStream:
@@ -173,7 +200,6 @@ class CameraStream:
         retries = 0
         while not self.stopped:
             cap = cv2.VideoCapture(self.url)
-            
             if not cap.isOpened():
                 log(f"❌ {self.name}: Failed to open stream. Retrying in 5s.", "error")
                 time.sleep(5)
@@ -187,12 +213,10 @@ class CameraStream:
             retries = 0
             
             while not self.stopped:
-                # Read and discard to get ONLY THE LATEST MOMENT
-                for _ in range(3):
+                for _ in range(3): # Drop frames to keep latency low
                     cap.grab()
                 
                 ok, frame = cap.read()
-                
                 if not ok or frame is None:
                     log(f"⚠️ {self.name}: Invalid stream/frame. Forcing reconnection.", "warning")
                     cap.release()
@@ -200,8 +224,7 @@ class CameraStream:
                 
                 with self.lock:
                     self.frame = frame
-                
-                time.sleep(0.01) # Minimal sleep to prevent CPU hogging
+                time.sleep(0.01)
             
             cap.release()
             
@@ -220,41 +243,27 @@ class CameraStream:
 def analyze_llm(camera_name, frame) -> dict:
     img_b64 = to_b64_jpg(frame)
     img_data_uri = f"data:image/jpeg;base64,{img_b64}"
-
     system_prompt = os.getenv(f"SYSTEM_PROMPT_{camera_name}", "")
 
     payload = {
         "model": MODEL_NAME,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": img_data_uri}}
-            ]},
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": img_data_uri}}]},
         ],
         "temperature": 0.1,
         "max_tokens": 700,
     }
 
     url = LM_API + LM_PATH
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}"
-    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"}
 
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=60) 
         r.raise_for_status()
-
         raw = r.json()["choices"][0]["message"]["content"]
         parsed = json.loads(raw)
-
-        return {
-            "score": float(parsed.get("score", 0.0)),
-            "text": parsed.get("description", ""),
-            "b64": img_b64
-        }
-
+        return {"score": float(parsed.get("score", 0.0)), "text": str(parsed.get("description") or ""), "b64": img_b64}
     except Exception as e:
         log(f"❌ LLM Error ({camera_name}): {e}", "error")
         return {"score": 0.0, "text": "LLM Analysis Error", "b64": img_b64}
@@ -262,133 +271,104 @@ def analyze_llm(camera_name, frame) -> dict:
 
 def process_camera_analysis(stream: CameraStream):
     """Consumer: Pulls frame, analyzes it, triggers alerts based on SCORE."""
-    
     name = stream.name
-    log(f"🧠 Consumer {name} started for cognitive analysis.")
-
+    log(f"🧠 Consumer {name} started.")
     last_tts_alert_at = 0.0
+    last_siren_alert_at = 0.0
 
     while not stream.stopped:
-        
         frame = stream.read() 
         if frame is None:
-            log(f"⏳ {name}: Waiting for first frame from producer...", "info")
             time.sleep(1)
             continue
         
-        # SLOW ANALYSIS
         frame = resize_if_needed(frame)
         res = analyze_llm(name, frame) 
         save_last_frame(name, frame)
 
         score = res["score"]
         text = res["text"]
-
-        # -------------------------------------------------------------
-        # Main Log: ONLY SCORE AND DESCRIPTION
-        # -------------------------------------------------------------
         log(f"[{name}] score={score:.2f} | {text}")
 
-        if score >= SCORE_THRESHOLD: 
+        # === LEVEL 1: CRITICAL THREAT (SIREN) ===
+        if score >= SCORE_CRITICAL:
+            send_telegram(res["b64"], f"🚨🔴 CRITICAL: {name} | Score={score:.2f}\n{text}")
             
-            # 1. Telegram Alert (Critical)
-            send_telegram(res["b64"], f"🚨 {name}: {text} | Risk={score:.2f}")
+            now = time.time()
+            if now - last_siren_alert_at >= SIREN_COOLDOWN:
+                play_siren_file()
+                last_siren_alert_at = now
+            else:
+                log("⏳ Siren cooling down...")
 
-            # 2. TTS Alert
+        # === LEVEL 2: WARNING (TTS) ===
+        elif score >= SCORE_THRESHOLD: 
+            send_telegram(res["b64"], f"⚠️ {name}: {text} | Risk={score:.2f}")
             if TTS_ENABLED:
                 now = time.time()
-                elapsed_tts = now - last_tts_alert_at
-                if elapsed_tts >= TTS_COOLDOWN:
-                    log(f"🔊 Playing audio alert for {name} (Risk={score:.2f})")
-                    play_audio(TTS_MESSAGE, TTS_LANG, repeats=3, delay=2.0)
+                if now - last_tts_alert_at >= TTS_COOLDOWN:
+                    log(f"🔊 Playing TTS for {name}")
+                    play_audio_tts(TTS_MESSAGE, TTS_LANG, repeats=2, delay=1.0)
                     last_tts_alert_at = now
         
-        # 3. OmniStatus
         inject_omnistatus(name, text, score)
         
+
+
         time.sleep(INTERVAL)
 
-
 # ============================================================
-# HEARTBEAT, TELEGRAM, OMNISTATUS & MAIN
+# MAIN
 # ============================================================
 
 def send_telegram(img_b64: str, caption: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1024]}
         files = {"photo": ("frame.jpg", base64.b64decode(img_b64), "image/jpeg")}
-        r = requests.post(url, data=data, files=files, timeout=20)
-        log(f"📨 Telegram status: {r.status_code}")
-    except Exception as e:
-        log(f"❌ Telegram Error: {e}", "error")
-
+        requests.post(url, data=data, files=files, timeout=20)
+    except Exception:
+        pass
 
 def inject_omnistatus(source: str, text: str, score: float):
-    if not ENABLE_OMNISTATUS or not OMNISTATUS_API:
-        return
+    if not ENABLE_OMNISTATUS or not OMNISTATUS_API: return
     try:
-        payload = {"source": source, "text": text, "score": score}
-        requests.post(OMNISTATUS_API, json=payload, timeout=10)
+        payload = {"source": source, "description": text, "value": score}
+        requests.post(OMNISTATUS_API, json=payload, timeout=5)
     except Exception as e:
-        log(f"❌ OmniStatus injection error: {e}", "error")
+        log(f"❌ OmniStatus Error: {e}", "error")
 
 def heartbeat_loop():
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log("Telegram not configured. Heartbeat disabled.", "warning")
-        return
-    
-    if not HEARTBEAT_ENABLED:
-        log("Heartbeat disabled in config.", "info")
-        return
-
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not HEARTBEAT_ENABLED: return
     hostname = socket.gethostname()
     while True:
         try:
-            msg = f"🟢 Sentinex active and running on: {hostname}"
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-            requests.post(url, data=data, timeout=20)
-            log(f"💓 Heartbeat sent: {msg}")
-        except Exception as e:
-            log(f"❌ Heartbeat Error: {e}", "error")
-        
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                          data={"chat_id": TELEGRAM_CHAT_ID, "text": f"🟢 Sentinex running on: {hostname} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"})
+        except Exception: pass
         time.sleep(HEARTBEAT_INTERVAL)
 
 def main():
     if not CAMERAS:
-        log("No cameras defined in .env (RTSP_URL_...). Exiting.", "error")
+        log("No cameras in .env. Exiting.", "error")
         return
 
     streams = {}
-
     for name, url in CAMERAS.items():
-        if not url:
-            continue
-        
-        # 1. START PRODUCER (Fast thread)
-        stream = CameraStream(name, url)
-        streams[name] = stream
-        
-        # 2. START CONSUMER (Slow AI thread)
-        Thread(target=process_camera_analysis, args=(stream,), daemon=True).start()
+        if url:
+            stream = CameraStream(name, url)
+            streams[name] = stream
+            Thread(target=process_camera_analysis, args=(stream,), daemon=True).start()
 
-    log("Sentinex started. Press Ctrl+C to exit.")
-
-    # Start Heartbeat Thread
+    log("Sentinex started. Ctrl+C to exit.")
     Thread(target=heartbeat_loop, daemon=True).start()
     
     while True:
-        try:
-            time.sleep(1)
+        try: time.sleep(1)
         except KeyboardInterrupt:
-            log("Shutting down...")
-            for stream in streams.values():
-                stream.stop()
+            for s in streams.values(): s.stop()
             break
-
 
 if __name__ == "__main__":
     main()
