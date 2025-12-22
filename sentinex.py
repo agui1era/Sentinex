@@ -62,7 +62,7 @@ SCORE_CRITICAL = float(os.getenv("SCORE_CRITICAL", "0.45"))   # Siren
 # Integrations
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-ENABLE_OMNISTATUS = os.getenv("ENABLE_OMNISTATUS", "0") == "1"
+ENABLE_OMNISTATUS = os.getenv("ENABLE_OMNISTATUS", "0") 
 OMNISTATUS_API = os.getenv("OMNISTATUS_ENDPOINT")
 
 # TTS (Text-to-Speech) - WARNING LEVEL
@@ -77,8 +77,8 @@ SIREN_FILE = os.getenv("SIREN_FILE", "alarma_infernal.wav")
 SIREN_COOLDOWN = float(os.getenv("SIREN_COOLDOWN", "30"))
 
 # Heartbeat
-HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "1") == "1"
-HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "86400"))
+HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "1") 
+HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "14400"))
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -342,11 +342,20 @@ def inject_omnistatus(source: str, text: str, score: float):
 def heartbeat_loop():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not HEARTBEAT_ENABLED: return
     hostname = socket.gethostname()
+    instance_name = os.getenv("SENTINEX_INSTANCE_NAME", f"Sentinex-{hostname}")
+
     while True:
         try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                          data={"chat_id": TELEGRAM_CHAT_ID, "text": f"🟢 Sentinex running on: {hostname} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"})
-        except Exception: pass
+            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            msg = f"🟢 {instance_name} Online | 📅 {now_str}"
+            
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+            requests.post(url, data=data, timeout=20)
+            log(f"💓 Heartbeat sent: {msg}")
+        except Exception as e:
+            log(f"❌ Heartbeat Error: {e}", "error")
+        
         time.sleep(HEARTBEAT_INTERVAL)
 
 def main():
