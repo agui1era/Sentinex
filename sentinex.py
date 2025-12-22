@@ -60,18 +60,18 @@ SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.4"))
 # Integrations
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-ENABLE_OMNISTATUS = os.getenv("ENABLE_OMNISTATUS", "0") == "1"
+ENABLE_OMNISTATUS = os.getenv("ENABLE_OMNISTATUS", "0") 
 OMNISTATUS_API = os.getenv("OMNISTATUS_ENDPOINT")
 
 # TTS (Text-to-Speech)
-TTS_ENABLED = os.getenv("TTS_ENABLED", "0") == "1"
+TTS_ENABLED = os.getenv("TTS_ENABLED", "0") 
 TTS_MESSAGE = os.getenv("TTS_MESSAGE", "Alert. Risk detected in the area.")
 TTS_LANG = os.getenv("TTS_LANG", "en") # Changed default to 'en' given the request, or keep 'es' in .env
 TTS_COOLDOWN = float(os.getenv("TTS_COOLDOWN", "60"))
 
 # Heartbeat
-HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "1") == "1"
-HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "86400"))
+HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "1") 
+HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "14400"))
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -345,9 +345,13 @@ def heartbeat_loop():
         return
 
     hostname = socket.gethostname()
+    instance_name = os.getenv("SENTINEX_INSTANCE_NAME", f"Sentinex-{hostname}")
+
     while True:
         try:
-            msg = f"🟢 Sentinex active and running on: {hostname}"
+            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            msg = f"🟢 {instance_name} Online | 📅 {now_str}"
+            
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
             requests.post(url, data=data, timeout=20)

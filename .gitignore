@@ -212,3 +212,7 @@ env_coqui/bin/futurize
 env_coqui/bin/pasteurize
 env_coqui/bin/httpx
 env_coqui/bin/uvicorn
+last_frames/CAM8_last.jpg
+.DS_Store
+sentinex.log.1
+.DS_Store
