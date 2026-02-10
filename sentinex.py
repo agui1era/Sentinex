@@ -333,9 +333,26 @@ def send_telegram(img_b64: str, caption: str):
 
 def inject_omnistatus(source: str, text: str, score: float):
     if not ENABLE_OMNISTATUS or not OMNISTATUS_API: return
+    
+    # Ensure URL ends with /event
+    # If the user put just binary URL (localhost:8001), append /event
+    # If they put full URL, leave it. Check if it ends in /event or has query params
+    target_url = OMNISTATUS_API
+    if not target_url.endswith("/event") and not target_url.endswith("/events"):
+        target_url = target_url.rstrip("/") + "/event"
+
     try:
-        payload = {"source": source, "description": text, "value": score}
-        requests.post(OMNISTATUS_API, json=payload, timeout=5)
+        payload = {"source": source, "text": text, "score": score}
+        # Debug log for 422 investigation
+        # log(f"Drafting OmniStatus payload: {json.dumps(payload)}", "debug")
+        
+        r = requests.post(target_url, json=payload, timeout=5)
+        
+        if r.status_code == 422:
+            log(f"❌ OmniStatus 422 Unprocessable Entity! Response: {r.text} | Payload: {json.dumps(payload)}", "error")
+        elif r.status_code != 200:
+            log(f"⚠️ OmniStatus returned {r.status_code}: {r.text}", "warning")
+            
     except Exception as e:
         log(f"❌ OmniStatus Error: {e}", "error")
 
