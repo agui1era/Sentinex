@@ -103,7 +103,7 @@ API_KEY=your_secret_key_here
 
 2. **Start the proxy**
 ```bash
-uvicorn server_proxy:app --host 0.0.0.0 --port 8001
+uvicorn proxy:app --host 0.0.0.0 --port 8001
 ```
 
 3. **Update main `.env`**
@@ -169,11 +169,11 @@ LM_TIMEOUT=60
 LLM_MAX_TOKENS=220               # Keep output short; model only needs JSON
 
 # Default system prompt (used if no camera-specific prompt)
-SYSTEM_PROMPT=You are a cognitive sentinel. You observe camera images to detect human presence, anomalies, or risks. Always respond in valid JSON: {"description":"brief description", "score":0.0}
+SYSTEM_PROMPT='You are a cognitive sentinel. You observe camera images to detect human presence, anomalies, or risks. Always respond in valid JSON: {"description":"brief description", "score":0.0}'
 
 # Camera-specific prompts (optional)
-SYSTEM_PROMPT_ENTRANCE=You monitor the main entrance. Detect unauthorized access, suspicious behavior, and security threats. Respond in JSON: {"description":"...", "score":0.0}
-SYSTEM_PROMPT_PARKING=You monitor the parking lot. Detect vehicle incidents, unauthorized parking, and suspicious activity. Respond in JSON: {"description":"...", "score":0.0}
+SYSTEM_PROMPT_ENTRANCE='You monitor the main entrance. Detect unauthorized access, suspicious behavior, and security threats. Respond in JSON: {"description":"...", "score":0.0}'
+SYSTEM_PROMPT_PARKING='You monitor the parking lot. Detect vehicle incidents, unauthorized parking, and suspicious activity. Respond in JSON: {"description":"...", "score":0.0}'
 
 # ============================================================
 # ⚠️ RISK SCORING & ALERTS
@@ -212,14 +212,40 @@ CRITICAL_LIGHTS_OFF_WEBHOOK_URL=
 CRITICAL_LIGHTS_OFF_ACTION_NAME=apagar_foco
 CRITICAL_LIGHTS_AUTO_OFF_SECONDS=300
 
+# Critical webhook (IFTTT, smart light, etc.)
+CRITICAL_WEBHOOK_URL=
+CRITICAL_CLEAR_WEBHOOK_URL=
+CRITICAL_WEBHOOK_COOLDOWN=30
+
 # ============================================================
 # 📊 OMNISTATUS INTEGRATION (Optional)
 # ============================================================
 ENABLE_OMNISTATUS=0
-OMNISTATUS_ENDPOINT=http://localhost:5000/api/status
+OMNISTATUS_ENDPOINT=http://localhost:8001/event
 OMNISTATUS_DEDUP_ENABLED=1
 OMNISTATUS_DEDUP_WINDOW_SECONDS=30
 OMNISTATUS_DEDUP_MAX_SAMPLES=3
+
+# ============================================================
+# 💓 HEARTBEAT & LOGGING
+# ============================================================
+HEARTBEAT_ENABLED=1
+HEARTBEAT_INTERVAL=86400
+SENTINEX_INSTANCE_NAME=Sentinex-local
+
+LOG_LEVEL=INFO
+LOG_FILE=sentinex.log
+
+# ============================================================
+# ⚙️ WEB ADMIN & TEST SETTINGS
+# ============================================================
+SENTINEX_ENV_FILE=.env
+ADMIN_REFRESH_MS=15000
+
+# Synthetic Telegram clip test
+CLIP_FPS=8
+CLIP_PRE_SECONDS=3
+CLIP_POST_SECONDS=3
 ```
 
 When deduplication is enabled, Sentinex groups repeated events per camera and normalized text before sending them to OmniStatus. The payload keeps `text` and `score` for compatibility, and adds `event_count`, `avg_score`, `first_seen`, `last_seen`, `summary`, `dedup_key`, and `samples`.
@@ -252,6 +278,12 @@ When deduplication is enabled, Sentinex groups repeated events per camera and no
 python sentinex.py
 ```
 
+### Test Telegram Alerts (Synthetic Clip)
+Verify your Telegram bot settings without needing an RTSP camera or LLM:
+```bash
+python test_video_clip.py
+```
+
 ### With Admin Panel
 ```bash
 # Terminal 1: Admin panel
@@ -264,7 +296,7 @@ python sentinex.py
 ### Production with Proxy
 ```bash
 # Terminal 1: Server proxy
-uvicorn server_proxy:app --port 8001
+uvicorn proxy:app --port 8001
 
 # Terminal 2: Admin panel
 uvicorn sentinex_admin:app --port 8000
